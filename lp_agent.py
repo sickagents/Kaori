@@ -363,6 +363,21 @@ def main():
     watch_p.add_argument("--interval", type=int, default=30, help="Scan interval in seconds")
     watch_p.add_argument("--no-auto", action="store_true", help="Only detect, don't auto-add LP")
 
+    # manage
+    subparsers.add_parser("manage", help="Manage open positions (PnL, exits)")
+
+    # learn
+    learn_p = subparsers.add_parser("learn", help="Show lessons and performance")
+    learn_p.add_argument("--evolve", action="store_true", help="Evolve thresholds based on history")
+
+    # test-notify
+    subparsers.add_parser("test-notify", help="Test Telegram notification")
+
+    # safety
+    safety_p = subparsers.add_parser("safety", help="Run safety checks")
+    safety_p.add_argument("--amount", type=str, default="0.01", help="Amount in ETH")
+    safety_p.add_argument("--dex", type=str, default="aerodrome", help="DEX name")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -409,6 +424,80 @@ def main():
         auto = not args.no_auto
         run_watcher(config, auto_add=auto, scan_interval=args.interval)
 
+    def cmd_manage(args, config):
+        """Manage open positions - monitor PnL, check exits, auto-close."""
+        from core.state import get_open_positions, update_position_pnl, check_exit_conditions, close_position
+        from core.lessons import record_performance
+        from utils.telegram import TelegramNotifier
+
+        w3 = get_w3(config)
+        notifier = TelegramNotifier(config)
+        positions = get_open_positions()
+
+        if not positions:
+            print("[*] No open positions to manage")
+            return
+
+        print(f"[*] Managing {len(positions)} open positions...\n")
+
+        for pos in positions:
+            pool = pos.get("pool", "?")
+            t0 = pos.get("token0_symbol", "?")
+            t1 = pos.get("token1_symbol", "?")
+            current_pnl = pos.get("current_pnl_pct", 0)
+            peak = pos.get("peak_pnl_pct", 0)
+
+            # Check exit conditions
+            exit_info = check_exit_conditions(pool, config)
+
+            if exit_info:
+                reason = exit_info["reason"]
+                print(f"  [CLOSE] {t0}/{t1} - Reason: {reason} (PnL: {current_pnl:+.2f}%)")
+                closed = close_position(pool, current_pnl, reason)
+                if closed:
+                    record_performance(closed)
+                    notifier.notify_close(closed)
+            else:
+                oor = "OOR" if pos.get("oor_since") else "IN"
+                print(f"  [HOLD]  {t0}/{t1} | PnL: {current_pnl:+.2f}% | Peak: {peak:+.2f}% | {oor}")
+
+    def cmd_learn(args, config):
+        """Show lessons and performance stats."""
+        from core.lessons import get_lessons_summary, evolve_thresholds
+
+        print(get_lessons_summary())
+
+        if args.evolve:
+            print("\n[*] Evolving thresholds...")
+            updated = evolve_thresholds(config)
+            print(f"    Updated config: {json.dumps(updated.get('screening', {}), indent=2)}")
+
+    def cmd_test_notify(args, config):
+        """Test Telegram notification."""
+        from utils.telegram import TelegramNotifier
+        notifier = TelegramNotifier(config)
+        result = notifier.send("Kaori LP Agent - Test notification")
+        print(f"Telegram: {'OK' if result else 'FAILED (check config)'}")
+
+    def cmd_safety(args, config):
+        """Run safety checks on a hypothetical deploy."""
+        from core.safety import run_deploy_checks, SafetyError
+        from core.state import get_open_positions
+
+        w3 = get_w3(config)
+        wallet = WalletManager(w3, config["wallets"]["single"])
+
+        pool = {"pool": "0xtest", "token0": {"address": "0x0"}, "token1": {"address": "0x1"}}
+        amount = int(float(args.amount) * 1e18)
+
+        try:
+            warnings = run_deploy_checks(config, w3, wallet.address, pool, amount, args.dex)
+            print(f"[OK] All safety checks passed")
+            for w in warnings:
+                print(f"  WARNING: {w}")
+        except SafetyError as e:
+            print(f"[FAIL] {e}")
+
     commands = {
         "run": cmd_run,
         "batch": cmd_batch,
@@ -417,6 +506,10 @@ def main():
         "show": cmd_show,
         "discover": cmd_discover,
         "watch": cmd_watch,
+        "manage": cmd_manage,
+        "learn": cmd_learn,
+        "test-notify": cmd_test_notify,
+        "safety": cmd_safety,
     }
 
     commands[args.command](args, config)
