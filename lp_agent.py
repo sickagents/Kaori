@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Base LP Agent - Automated Liquidity Pool management on Base network.
+Kaori - Automated Liquidity Pool Agent for Base Network.
 
-Supports Uniswap V3 (concentrated liquidity) and Aerodrome (stable/volatile pools).
+Supports Uniswap V3 and Aerodrome with auto/manual modes.
+Mode is set in config.json: "auto" or "manual".
 """
 
 import argparse
@@ -16,7 +17,6 @@ import yaml
 from web3 import Web3
 from eth_account import Account
 
-# Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from core.wallet import WalletManager
@@ -28,327 +28,328 @@ from utils.approvals import ApprovalManager
 from utils.formatting import format_amount, parse_amount
 
 
-def load_config(config_path: str = None) -> dict:
-    """Load config from YAML file."""
-    if config_path is None:
-        config_path = Path(__file__).parent / "config.yaml"
-    with open(config_path) as f:
-        return yaml.safe_load(f)
+CONFIG_FILE = Path(__file__).parent / "config.json"
 
 
-def get_w3(rpc: str) -> Web3:
+def load_config() -> dict:
+    """Load config from config.json."""
+    with open(CONFIG_FILE) as f:
+        return json.load(f)
+
+
+def save_config(config: dict):
+    """Save config to config.json."""
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(config, f, indent=2)
+
+
+def get_w3(config: dict) -> Web3:
     """Initialize Web3 connection."""
-    w3 = Web3(Web3.HTTPProvider(rpc))
+    w3 = Web3(Web3.HTTPProvider(config["rpc"]))
     if not w3.is_connected():
-        raise ConnectionError(f"Failed to connect to RPC: {rpc}")
+        raise ConnectionError(f"Failed to connect to RPC: {config['rpc']}")
     print(f"[+] Connected to Base (block: {w3.eth.block_number})")
     return w3
 
 
-def cmd_add(args, config):
-    """Add liquidity to a pool."""
-    w3 = get_w3(config["rpc"])
-    wallet = WalletManager(w3, args.wallet or os.path.expanduser("~/.hermes/credentials/wallet-keys-evm.env"))
-    tokens = TokenRegistry(config["tokens"])
-    gas = GasEstimator(w3, config["chain_id"], config["gas_multiplier"])
+def resolve_token(tokens_config: dict, identifier: str) -> dict:
+    """Resolve token by symbol or address."""
+    key = identifier.upper()
+    if key in tokens_config:
+        return {
+            "address": Web3.to_checksum_address(tokens_config[key]["address"]),
+            "decimals": tokens_config[key]["decimals"],
+            "symbol": key,
+        }
+    try:
+        addr = Web3.to_checksum_address(identifier)
+        return {"address": addr, "decimals": 18, "symbol": "UNKNOWN"}
+    except Exception:
+        raise ValueError(f"Unknown token: {identifier}")
 
-    # Resolve token addresses
-    t0 = tokens.resolve(args.token0)
-    t1 = tokens.resolve(args.token1)
-    amount0 = parse_amount(args.amount0, t0["decimals"])
-    amount1 = parse_amount(args.amount1, t1["decimals"])
 
-    dex_name = args.dex.lower()
-
+def get_dex(config: dict, w3: Web3, gas: GasEstimator, dex_name: str):
+    """Get DEX instance by name."""
     if dex_name == "uniswap":
-        dex = UniswapV3(w3, config["dex"]["uniswap_v3"], gas)
-        fee = int(args.fee) if args.fee else 500
-        tick_lower = int(args.tick_lower) if args.tick_lower else -887220
-        tick_upper = int(args.tick_upper) if args.tick_upper else 887220
-
-        print(f"[*] Adding Uniswap V3 LP: {args.amount0} {args.token0} + {args.amount1} {args.token1}")
-        print(f"    Fee tier: {fee / 10000}%, Tick range: [{tick_lower}, {tick_upper}]")
-
-        # Approve tokens
-        ApprovalManager(w3, wallet).ensure_approval(
-            t0["address"], config["dex"]["uniswap_v3"]["position_manager"], amount0
-        )
-        ApprovalManager(w3, wallet).ensure_approval(
-            t1["address"], config["dex"]["uniswap_v3"]["position_manager"], amount1
-        )
-
-        # Add liquidity
-        tx_hash = dex.add_liquidity(
-            wallet=wallet,
-            token0=t0["address"],
-            token1=t1["address"],
-            fee=fee,
-            tick_lower=tick_lower,
-            tick_upper=tick_upper,
-            amount0_desired=amount0,
-            amount1_desired=amount1,
-            slippage=config["slippage"],
-            deadline=config["deadline"],
-        )
-        print(f"[+] Liquidity added! TX: https://basescan.org/tx/0x{tx_hash.hex()}")
-
+        return UniswapV3(w3, config["dex"]["uniswap_v3"], gas)
     elif dex_name == "aerodrome":
-        dex = Aerodrome(w3, config["dex"]["aerodrome"], gas)
-        stable = args.stable.lower() == "true" if args.stable else False
-
-        print(f"[*] Adding Aerodrome LP: {args.amount0} {args.token0} + {args.amount1} {args.token1}")
-        print(f"    Stable: {stable}")
-
-        # Approve tokens
-        ApprovalManager(w3, wallet).ensure_approval(
-            t0["address"], config["dex"]["aerodrome"]["router"], amount0
-        )
-        ApprovalManager(w3, wallet).ensure_approval(
-            t1["address"], config["dex"]["aerodrome"]["router"], amount1
-        )
-
-        # Add liquidity
-        tx_hash = dex.add_liquidity(
-            wallet=wallet,
-            token0=t0["address"],
-            token1=t1["address"],
-            amount0_desired=amount0,
-            amount1_desired=amount1,
-            stable=stable,
-            slippage=config["slippage"],
-            deadline=config["deadline"],
-        )
-        print(f"[+] Liquidity added! TX: https://basescan.org/tx/0x{tx_hash.hex()}")
-
+        return Aerodrome(w3, config["dex"]["aerodrome"], gas)
     else:
-        print(f"[-] Unknown DEX: {dex_name}. Use 'uniswap' or 'aerodrome'")
-        sys.exit(1)
+        raise ValueError(f"Unknown DEX: {dex_name}")
 
 
-def cmd_auto(args, config):
-    """Auto-find best pool and add liquidity."""
-    w3 = get_w3(config["rpc"])
-    tokens = TokenRegistry(config["tokens"])
-    t0 = tokens.resolve(args.token0)
-    t1 = tokens.resolve(args.token1)
-
-    print(f"[*] Finding best pool for {args.token0}/{args.token1}...")
-
-    # Check Aerodrome first (usually better rewards on Base)
-    aero = Aerodrome(w3, config["dex"]["aerodrome"], GasEstimator(w3, config["chain_id"], config["gas_multiplier"]))
-    aero_pool = aero.find_pool(t0["address"], t1["address"])
-
-    # Check Uniswap V3
-    uni = UniswapV3(w3, config["dex"]["uniswap_v3"], GasEstimator(w3, config["chain_id"], config["gas_multiplier"]))
-    uni_pools = uni.find_pools(t0["address"], t1["address"])
-
-    print(f"\n[+] Found pools:")
-    if aero_pool:
-        print(f"    Aerodrome: {aero_pool['address']} (stable: {aero_pool['stable']})")
-    for p in uni_pools:
-        print(f"    Uniswap V3: {p['address']} (fee: {p['fee'] / 10000}%)")
-
-    # Default: use Aerodrome if available, else Uniswap V3 0.3%
-    if aero_pool:
-        print(f"\n[*] Using Aerodrome pool")
-        args.dex = "aerodrome"
-        args.stable = str(aero_pool["stable"])
-    elif uni_pools:
-        best = uni_pools[0]
-        print(f"\n[*] Using Uniswap V3 pool (fee: {best['fee'] / 10000}%)")
-        args.dex = "uniswap"
-        args.fee = str(best["fee"])
-    else:
-        print("[-] No pools found for this pair")
-        sys.exit(1)
-
-    cmd_add(args, config)
+def approve_tokens(w3, wallet, t0, t1, amount0, amount1, spender):
+    """Approve both tokens for spender."""
+    ApprovalManager(w3, wallet).ensure_approval(t0["address"], spender, amount0)
+    ApprovalManager(w3, wallet).ensure_approval(t1["address"], spender, amount1)
 
 
-def cmd_positions(args, config):
-    """Check LP positions."""
-    w3 = get_w3(config["rpc"])
-    wallet = WalletManager(w3, args.wallet or os.path.expanduser("~/.hermes/credentials/wallet-keys-evm.env"))
-    gas = GasEstimator(w3, config["chain_id"], config["gas_multiplier"])
+def add_lp_uniswap(config, w3, wallet, gas, t0, t1, amount0, amount1, pair_cfg):
+    """Add liquidity to Uniswap V3."""
+    dex = UniswapV3(w3, config["dex"]["uniswap_v3"], gas)
+    fee = pair_cfg.get("fee", config["manual"]["fee"] if "manual" in config else 500)
+    tick_lower = pair_cfg.get("tick_lower", -config["auto"]["tick_range"] if "auto" in config else -887220)
+    tick_upper = pair_cfg.get("tick_upper", config["auto"]["tick_range"] if "auto" in config else 887220)
 
-    print(f"[*] Checking positions for {wallet.address}...")
+    print(f"    DEX: Uniswap V3 | Fee: {fee / 10000}% | Range: [{tick_lower}, {tick_upper}]")
 
-    # Uniswap V3 positions
-    uni = UniswapV3(w3, config["dex"]["uniswap_v3"], gas)
-    uni_positions = uni.get_positions(wallet.address)
+    approve_tokens(w3, wallet, t0, t1, amount0, amount1, config["dex"]["uniswap_v3"]["position_manager"])
 
-    if uni_positions:
-        print(f"\n[Uniswap V3 Positions]")
-        for pos in uni_positions:
-            print(f"  #{pos['id']}: {pos['token0']}/{pos['token1']} "
-                  f"fee={pos['fee'] / 10000}% | "
-                  f"liquidity={pos['liquidity']} | "
-                  f"range=[{pos['tick_lower']}, {pos['tick_upper']}]")
-    else:
-        print("\n[Uniswap V3] No positions found")
-
-    # Aerodrome LP tokens
-    aero = Aerodrome(w3, config["dex"]["aerodrome"], gas)
-    aero_positions = aero.get_positions(wallet.address)
-
-    if aero_positions:
-        print(f"\n[Aerodrome Positions]")
-        for pos in aero_positions:
-            print(f"  Pool: {pos['pool']} | "
-                  f"Balance: {pos['balance']} | "
-                  f"Token0: {pos['token0']} | Token1: {pos['token1']}")
-    else:
-        print("\n[Aerodrome] No positions found")
-
-
-def cmd_remove(args, config):
-    """Remove liquidity from a position."""
-    w3 = get_w3(config["rpc"])
-    wallet = WalletManager(w3, args.wallet or os.path.expanduser("~/.hermes/credentials/wallet-keys-evm.env"))
-    gas = GasEstimator(w3, config["chain_id"], config["gas_multiplier"])
-
-    position_id = int(args.position_id)
-    percent = int(args.percent)
-
-    print(f"[*] Removing {percent}% liquidity from position #{position_id}")
-
-    uni = UniswapV3(w3, config["dex"]["uniswap_v3"], gas)
-    tx_hash = uni.remove_liquidity(
-        wallet=wallet,
-        position_id=position_id,
-        percent=percent,
-        slippage=config["slippage"],
-        deadline=config["deadline"],
+    tx_hash = dex.add_liquidity(
+        wallet=wallet, token0=t0["address"], token1=t1["address"],
+        fee=fee, tick_lower=tick_lower, tick_upper=tick_upper,
+        amount0_desired=amount0, amount1_desired=amount1,
+        slippage=config["slippage"], deadline=config["deadline"],
     )
-    print(f"[+] Liquidity removed! TX: https://basescan.org/tx/0x{tx_hash.hex()}")
+    return tx_hash
+
+
+def add_lp_aerodrome(config, w3, wallet, gas, t0, t1, amount0, amount1, pair_cfg):
+    """Add liquidity to Aerodrome."""
+    dex = Aerodrome(w3, config["dex"]["aerodrome"], gas)
+    stable = pair_cfg.get("stable", False)
+
+    print(f"    DEX: Aerodrome | Stable: {stable}")
+
+    approve_tokens(w3, wallet, t0, t1, amount0, amount1, config["dex"]["aerodrome"]["router"])
+
+    tx_hash = dex.add_liquidity(
+        wallet=wallet, token0=t0["address"], token1=t1["address"],
+        amount0_desired=amount0, amount1_desired=amount1,
+        stable=stable, slippage=config["slippage"], deadline=config["deadline"],
+    )
+    return tx_hash
+
+
+def add_lp_for_pair(config, w3, wallet, gas, pair):
+    """Add LP for a single pair. Auto-selects DEX or uses specified one."""
+    t0 = resolve_token(config["tokens"], pair["token0"])
+    t1 = resolve_token(config["tokens"], pair["token1"])
+    amount0 = parse_amount(str(pair["amount0"]), t0["decimals"])
+    amount1 = parse_amount(str(pair["amount1"]), t1["decimals"])
+
+    print(f"\n[*] {pair['amount0']} {pair['token0']} + {pair['amount1']} {pair['token1']}")
+
+    # Determine DEX
+    dex_name = pair.get("dex", None)
+    if not dex_name:
+        dex_name = pair.get("prefer_dex", config.get("auto", {}).get("prefer_dex", "aerodrome"))
+
+    # Auto-select: try Aerodrome first, fallback Uniswap
+    if dex_name == "auto" or dex_name is None:
+        aero = Aerodrome(w3, config["dex"]["aerodrome"], gas)
+        pool = aero.find_pool(t0["address"], t1["address"])
+        if pool:
+            dex_name = "aerodrome"
+            pair["stable"] = pool["stable"]
+            print(f"    Auto-selected: Aerodrome (stable={pool['stable']})")
+        else:
+            dex_name = "uniswap"
+            print(f"    Auto-selected: Uniswap V3 (no Aerodrome pool)")
+
+    if dex_name in ("aerodrome", "aero"):
+        tx_hash = add_lp_aerodrome(config, w3, wallet, gas, t0, t1, amount0, amount1, pair)
+    else:
+        tx_hash = add_lp_uniswap(config, w3, wallet, gas, t0, t1, amount0, amount1, pair)
+
+    print(f"    TX: https://basescan.org/tx/0x{tx_hash.hex()}")
+    return tx_hash
+
+
+# ── COMMANDS ──
+
+def cmd_run(args, config):
+    """Run LP agent based on config mode (auto/manual)."""
+    mode = config["mode"]
+    print(f"[*] Mode: {mode.upper()}")
+
+    w3 = get_w3(config)
+    wallet_path = os.path.expanduser(config["wallets"]["single"])
+    wallet = WalletManager(w3, wallet_path)
+    gas = GasEstimator(w3, config["chain_id"], config["gas_multiplier"])
+
+    print(f"[*] Wallet: {wallet.address}")
+
+    if mode == "manual":
+        # Manual mode: single pair from config
+        m = config["manual"]
+        pair = {
+            "token0": m["token0"],
+            "token1": m["token1"],
+            "amount0": m["amount0"],
+            "amount1": m["amount1"],
+            "dex": m["dex"],
+            "fee": m.get("fee", 500),
+            "tick_lower": m.get("tick_lower", -887220),
+            "tick_upper": m.get("tick_upper", 887220),
+            "stable": m.get("stable", False),
+        }
+        add_lp_for_pair(config, w3, wallet, gas, pair)
+
+    elif mode == "auto":
+        # Auto mode: iterate pairs, optional loop
+        pairs = config["auto"]["pairs"]
+        interval = config["auto"].get("run_interval_seconds", 0)
+        max_positions = config["auto"].get("max_positions", 5)
+
+        while True:
+            print(f"\n{'='*50}")
+            print(f"[*] Running {len(pairs)} pairs (max positions: {max_positions})")
+
+            for i, pair in enumerate(pairs):
+                try:
+                    pair_copy = dict(pair)
+                    pair_copy.setdefault("dex", config["auto"].get("prefer_dex", "aerodrome"))
+                    pair_copy.setdefault("stable", config["auto"].get("stable", False))
+                    pair_copy.setdefault("fee", config["auto"].get("fee_tier", 500))
+                    add_lp_for_pair(config, w3, wallet, gas, pair_copy)
+                except Exception as e:
+                    print(f"    ERROR: {e}")
+
+                if i < len(pairs) - 1:
+                    time.sleep(5)
+
+            if interval <= 0:
+                break
+
+            print(f"\n[*] Sleeping {interval}s until next run...")
+            time.sleep(interval)
+
+    else:
+        print(f"[-] Unknown mode: {mode}. Use 'auto' or 'manual' in config.json")
+        sys.exit(1)
+
+    print(f"\n[+] Done!")
 
 
 def cmd_batch(args, config):
     """Batch LP across multiple wallets."""
-    w3 = get_w3(config["rpc"])
-    tokens = TokenRegistry(config["tokens"])
-    t0 = tokens.resolve(args.token0)
-    t1 = tokens.resolve(args.token1)
+    w3 = get_w3(config)
+    gas = GasEstimator(w3, config["chain_id"], config["gas_multiplier"])
 
-    # Load wallets
-    wallets_path = Path(args.wallets).expanduser()
+    wallets_path = Path(args.wallets or config["wallets"]["batch"]).expanduser()
     with open(wallets_path) as f:
         wallet_data = json.load(f)
 
-    print(f"[*] Batch LP: {len(wallet_data)} wallets, {args.amount0} {args.token0} + {args.amount1} {args.token1}")
+    mode = config["mode"]
 
-    gas = GasEstimator(w3, config["chain_id"], config["gas_multiplier"])
-    amount0 = parse_amount(args.amount0, t0["decimals"])
-    amount1 = parse_amount(args.amount1, t1["decimals"])
+    if mode == "manual":
+        pairs = [config["manual"]]
+    else:
+        pairs = config["auto"]["pairs"]
+
+    print(f"[*] Batch LP: {len(wallet_data)} wallets x {len(pairs)} pairs")
 
     results = {"ok": 0, "error": 0, "errors": []}
 
     for i, wd in enumerate(wallet_data):
-        try:
-            wallet = WalletManager(w3, private_key=wd["private_key"])
-            print(f"\n[{i + 1}/{len(wallet_data)}] {wallet.address[:10]}...")
+        wallet = WalletManager(w3, private_key=wd["private_key"])
+        print(f"\n[{i + 1}/{len(wallet_data)}] {wallet.address[:10]}...")
 
-            dex_name = args.dex.lower()
+        for pair in pairs:
+            try:
+                pair_copy = dict(pair)
+                if mode == "auto":
+                    pair_copy.setdefault("dex", config["auto"].get("prefer_dex", "aerodrome"))
+                    pair_copy.setdefault("stable", config["auto"].get("stable", False))
+                    pair_copy.setdefault("fee", config["auto"].get("fee_tier", 500))
+                add_lp_for_pair(config, w3, wallet, gas, pair_copy)
+                results["ok"] += 1
+            except Exception as e:
+                print(f"    ERROR: {e}")
+                results["error"] += 1
+                results["errors"].append({"index": i, "address": wd.get("address", ""), "error": str(e)})
 
-            if dex_name == "aerodrome":
-                dex = Aerodrome(w3, config["dex"]["aerodrome"], gas)
-                stable = args.stable.lower() == "true" if args.stable else False
-
-                ApprovalManager(w3, wallet).ensure_approval(
-                    t0["address"], config["dex"]["aerodrome"]["router"], amount0
-                )
-                ApprovalManager(w3, wallet).ensure_approval(
-                    t1["address"], config["dex"]["aerodrome"]["router"], amount1
-                )
-
-                tx_hash = dex.add_liquidity(
-                    wallet=wallet, token0=t0["address"], token1=t1["address"],
-                    amount0_desired=amount0, amount1_desired=amount1,
-                    stable=stable, slippage=config["slippage"], deadline=config["deadline"],
-                )
-            else:
-                dex = UniswapV3(w3, config["dex"]["uniswap_v3"], gas)
-                fee = int(args.fee) if args.fee else 500
-
-                ApprovalManager(w3, wallet).ensure_approval(
-                    t0["address"], config["dex"]["uniswap_v3"]["position_manager"], amount0
-                )
-                ApprovalManager(w3, wallet).ensure_approval(
-                    t1["address"], config["dex"]["uniswap_v3"]["position_manager"], amount1
-                )
-
-                tx_hash = dex.add_liquidity(
-                    wallet=wallet, token0=t0["address"], token1=t1["address"],
-                    fee=fee, tick_lower=-887220, tick_upper=887220,
-                    amount0_desired=amount0, amount1_desired=amount1,
-                    slippage=config["slippage"], deadline=config["deadline"],
-                )
-
-            print(f"    TX: https://basescan.org/tx/0x{tx_hash.hex()}")
-            results["ok"] += 1
-
-        except Exception as e:
-            print(f"    ERROR: {e}")
-            results["error"] += 1
-            results["errors"].append({"index": i, "address": wd.get("address", "unknown"), "error": str(e)})
-
-        # Small delay between wallets
         if i < len(wallet_data) - 1:
             time.sleep(2)
 
     print(f"\n[+] Batch complete: {results['ok']} ok, {results['error']} errors")
     if results["errors"]:
-        with open("/tmp/lp_batch_errors.json", "w") as f:
+        with open("/tmp/kaori_batch_errors.json", "w") as f:
             json.dump(results["errors"], f, indent=2)
-        print(f"    Errors saved to /tmp/lp_batch_errors.json")
+        print(f"    Errors saved to /tmp/kaori_batch_errors.json")
+
+
+def cmd_positions(args, config):
+    """Check LP positions."""
+    w3 = get_w3(config)
+    wallet_path = os.path.expanduser(config["wallets"]["single"])
+    wallet = WalletManager(w3, wallet_path)
+    gas = GasEstimator(w3, config["chain_id"], config["gas_multiplier"])
+
+    print(f"[*] Positions for {wallet.address}\n")
+
+    # Uniswap V3
+    uni = UniswapV3(w3, config["dex"]["uniswap_v3"], gas)
+    uni_positions = uni.get_positions(wallet.address)
+
+    if uni_positions:
+        print("[Uniswap V3]")
+        for pos in uni_positions:
+            print(f"  #{pos['id']}: {pos['token0'][:10]}.../{pos['token1'][:10]}... "
+                  f"fee={pos['fee'] / 10000}% liquidity={pos['liquidity']}")
+    else:
+        print("[Uniswap V3] No positions")
+
+    # Aerodrome
+    print("\n[Aerodrome] Check manually: https://aerodrome.finance/liquidity")
+
+
+def cmd_set_mode(args, config):
+    """Switch mode in config.json."""
+    mode = args.mode.lower()
+    if mode not in ("auto", "manual"):
+        print(f"[-] Invalid mode: {mode}. Use 'auto' or 'manual'")
+        sys.exit(1)
+
+    config["mode"] = mode
+    save_config(config)
+    print(f"[+] Mode set to: {mode.upper()}")
+
+
+def cmd_show(args, config):
+    """Show current config."""
+    mode = config["mode"]
+    print(f"Mode: {mode.upper()}\n")
+
+    if mode == "manual":
+        m = config["manual"]
+        print(f"  DEX:     {m['dex']}")
+        print(f"  Pair:    {m['token0']}/{m['token1']}")
+        print(f"  Amounts: {m['amount0']} {m['token0']} + {m['amount1']} {m['token1']}")
+        print(f"  Stable:  {m.get('stable', False)}")
+        if m["dex"] == "uniswap":
+            print(f"  Fee:     {m.get('fee', 500) / 10000}%")
+    else:
+        a = config["auto"]
+        print(f"  Prefer DEX: {a['prefer_dex']}")
+        print(f"  Interval:   {a['run_interval_seconds']}s")
+        print(f"  Max Pos:    {a['max_positions']}")
+        print(f"  Pairs:")
+        for p in a["pairs"]:
+            print(f"    - {p['amount0']} {p['token0']} + {p['amount1']} {p['token1']}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Base LP Agent - Automated Liquidity Pool Management")
-    parser.add_argument("--config", type=str, help="Config file path")
-    parser.add_argument("--wallet", type=str, help="Wallet file path (.env format)")
+    parser = argparse.ArgumentParser(description="Kaori - Base LP Agent")
+    subparsers = parser.add_subparsers(dest="command")
 
-    subparsers = parser.add_subparsers(dest="command", help="Command to run")
+    # run (default)
+    subparsers.add_parser("run", help="Run LP agent (auto/manual based on config)")
 
-    # add command
-    add_parser = subparsers.add_parser("add", help="Add liquidity to a pool")
-    add_parser.add_argument("--dex", required=True, choices=["uniswap", "aerodrome"], help="DEX to use")
-    add_parser.add_argument("--token0", required=True, help="Token0 address or symbol")
-    add_parser.add_argument("--token1", required=True, help="Token1 address or symbol")
-    add_parser.add_argument("--amount0", required=True, help="Amount of token0")
-    add_parser.add_argument("--amount1", required=True, help="Amount of token1")
-    add_parser.add_argument("--fee", type=str, help="Fee tier (Uniswap: 100, 500, 3000, 10000)")
-    add_parser.add_argument("--tick-lower", type=str, help="Lower tick (Uniswap)")
-    add_parser.add_argument("--tick-upper", type=str, help="Upper tick (Uniswap)")
-    add_parser.add_argument("--stable", type=str, help="Stable pool (Aerodrome: true/false)")
+    # batch
+    batch_p = subparsers.add_parser("batch", help="Batch LP across wallets")
+    batch_p.add_argument("--wallets", type=str, help="Wallet JSON file path")
 
-    # auto command
-    auto_parser = subparsers.add_parser("auto", help="Auto-find best pool and add liquidity")
-    auto_parser.add_argument("--token0", required=True, help="Token0 address or symbol")
-    auto_parser.add_argument("--token1", required=True, help="Token1 address or symbol")
-    auto_parser.add_argument("--amount0", required=True, help="Amount of token0")
-    auto_parser.add_argument("--amount1", required=True, help="Amount of token1")
-    auto_parser.add_argument("--fee", type=str, help="Fee tier override (Uniswap)")
-    auto_parser.add_argument("--stable", type=str, help="Stable pool override (Aerodrome)")
+    # positions
+    subparsers.add_parser("positions", help="Check LP positions")
 
-    # positions command
-    pos_parser = subparsers.add_parser("positions", help="Check LP positions")
+    # mode
+    mode_p = subparsers.add_parser("mode", help="Set mode (auto/manual)")
+    mode_p.add_argument("mode", choices=["auto", "manual"])
 
-    # remove command
-    rm_parser = subparsers.add_parser("remove", help="Remove liquidity")
-    rm_parser.add_argument("--position-id", required=True, help="Position NFT ID")
-    rm_parser.add_argument("--percent", default="100", help="Percentage to remove (1-100)")
-
-    # batch command
-    batch_parser = subparsers.add_parser("batch", help="Batch LP across multiple wallets")
-    batch_parser.add_argument("--wallets", required=True, help="Wallet JSON file path")
-    batch_parser.add_argument("--dex", required=True, choices=["uniswap", "aerodrome"], help="DEX to use")
-    batch_parser.add_argument("--token0", required=True, help="Token0 address or symbol")
-    batch_parser.add_argument("--token1", required=True, help="Token1 address or symbol")
-    batch_parser.add_argument("--amount0", required=True, help="Amount of token0 per wallet")
-    batch_parser.add_argument("--amount1", required=True, help="Amount of token1 per wallet")
-    batch_parser.add_argument("--fee", type=str, help="Fee tier (Uniswap)")
-    batch_parser.add_argument("--stable", type=str, help="Stable pool (Aerodrome)")
+    # show
+    subparsers.add_parser("show", help="Show current config")
 
     args = parser.parse_args()
 
@@ -356,14 +357,14 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    config = load_config(args.config)
+    config = load_config()
 
     commands = {
-        "add": cmd_add,
-        "auto": cmd_auto,
-        "positions": cmd_positions,
-        "remove": cmd_remove,
+        "run": cmd_run,
         "batch": cmd_batch,
+        "positions": cmd_positions,
+        "mode": cmd_set_mode,
+        "show": cmd_show,
     }
 
     commands[args.command](args, config)
