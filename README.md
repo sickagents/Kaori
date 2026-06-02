@@ -1,10 +1,10 @@
 # Kaori
 
-Automated Liquidity Pool agent for **Base network**. Supports Uniswap V3 and Aerodrome.
+Autonomous LP agent for **Base network**. Inspired by [Meridian](https://github.com/yunus-0x/meridian) (Solana DLMM agent).
 
-**Works with ALL tokens on Base** - no hardcoded token list. Tokens are resolved dynamically on-chain.
+Supports Uniswap V3 and Aerodrome. Works with **ALL tokens** on Base - no hardcoded list.
 
-## Quick Start (Server)
+## Quick Start
 
 ```bash
 git clone https://github.com/sickagents/Kaori.git
@@ -19,79 +19,99 @@ python3 lp_agent.py run
 
 | Command | Description |
 |---------|-------------|
-| `run` | Execute LP based on config mode (auto/manual) |
-| `discover --blocks N` | Scan last N blocks for new pools |
-| `watch --interval N` | Real-time watch + auto-LP new pools |
-| `watch --no-auto` | Detect new pools only |
-| `batch --wallets file.json` | Run LP across multiple wallets |
-| `positions` | Check active LP positions |
+| `run` | Execute LP (auto/manual based on config) |
+| `discover --blocks N` | Scan for new pools |
+| `watch --interval N` | Real-time watch + auto-LP |
+| `manage` | Monitor positions, check exits, auto-close |
+| `learn --evolve` | Show performance, evolve thresholds |
+| `batch --wallets file.json` | Multi-wallet LP |
+| `positions` | Check LP positions |
+| `safety --amount 0.01` | Run pre-deploy safety checks |
+| `test-notify` | Test Telegram |
 | `mode <auto\|manual>` | Switch mode |
-| `show` | Show current config |
+| `show` | Show config |
 
-## How It Works
+## Position Lifecycle (Meridian-style)
 
-**Dynamic Token Resolution:**
-- No hardcoded token list
-- Tokens are resolved on-chain via ERC-20 `symbol()`, `decimals()`, `name()`
-- Works with ANY token that has a pool on Uniswap V3 or Aerodrome
-- Supports thousands to millions of tokens
+```
+1. DISCOVER  -> Scan Factory events for new pools
+2. SCREEN    -> Score by fee/TVL, volume, holders
+3. SAFETY    -> 9 checks (balance, cooldowns, duplicates)
+4. DEPLOY    -> Add liquidity with slippage protection
+5. MONITOR   -> Track PnL, peak, OOR status
+6. EXIT      -> Stop loss / trailing TP / OOR timeout / low yield
+7. LEARN     -> Record performance, evolve thresholds
+```
 
-**Pool Discovery:**
-- Monitors `PoolCreated` events from Uniswap V3 Factory
-- Monitors Aerodrome Factory events
-- Resolves both tokens in each new pool on-chain
-- Filters for pools with base tokens (WETH, USDC, etc.)
+## Exit Conditions
 
-**Auto-LP:**
-- Adds liquidity to new pools automatically
-- Uses 5% of ETH balance per pool (max 0.005 ETH)
-- Only targets pools with base/stable tokens
-- Tracks seen pools to avoid duplicates
+| Condition | Default | Description |
+|-----------|---------|-------------|
+| Stop loss | -15% | Close if PnL drops below threshold |
+| Trailing TP | 10% peak, 3% drop | Close if peak PnL drops by trailing % |
+| OOR timeout | 30 min | Close if out-of-range too long |
+| Low yield | <1% after 60min | Close if fees too low |
 
-## Configuration (config.json)
+## Safety Checks (9 checks before deploy)
+
+1. Max positions not exceeded
+2. No duplicate pool
+3. No duplicate token
+4. Pool not on cooldown
+5. Token not on cooldown
+6. Amount > minimum
+7. Amount < maximum
+8. Balance covers amount + gas reserve
+9. Pool TVL within range
+
+## Lessons Engine
+
+Records every closed position and derives lessons:
+- Win rate tracking
+- Per-pair performance
+- Threshold evolution (max 20% per step)
+- Auto-adjusts screening parameters
+
+```bash
+python3 lp_agent.py learn           # Show stats
+python3 lp_agent.py learn --evolve  # Evolve thresholds
+```
+
+## Telegram Notifications
 
 ```json
 {
-  "mode": "auto",
-  "auto": {
-    "pairs": [
-      {"token0": "WETH", "token1": "USDC", "amount0": "0.01", "amount1": "35"},
-      {"token0": "0x...", "token1": "USDC", "amount0": "100", "amount1": "100"}
-    ]
-  },
-  "manual": {
-    "dex": "aerodrome",
-    "token0": "WETH",
-    "token1": "0xSOME_TOKEN_ADDRESS",
-    "amount0": "0.01",
-    "amount1": "100"
+  "telegram": {
+    "enabled": true,
+    "bot_token": "YOUR_BOT_TOKEN",
+    "chat_id": "YOUR_CHAT_ID"
   }
 }
 ```
 
-**Manual mode** accepts:
-- Symbol: `"WETH"`, `"USDC"`, `"AERO"` (from base_tokens lookup)
-- Address: `"0x532f27101965dd16442E59d40670FaF5eBB142E4"` (any ERC-20)
+Events: deploy, close, error, new pool, daily summary.
 
-## Supported DEXs
+## Dynamic Token Support
 
-| DEX | Type | Router |
-|-----|------|--------|
-| Uniswap V3 | Concentrated liquidity | `0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1` |
-| Aerodrome | Stable/Volatile pools | `0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43` |
+No hardcoded token list. Any ERC-20 on Base works:
+- Address: `"0x532f27101965dd16442E59d40670FaF5eBB142E4"`
+- Symbol: `"WETH"`, `"USDC"` (from base_tokens lookup)
 
 ## Architecture
 
 ```
-lp_agent.py          - CLI (run/discover/watch/batch/positions/mode/show)
-config.json          - Configuration
+lp_agent.py          - CLI (12 commands)
+config.json          - All configuration
 wallet.env           - Private key (git-ignored)
 core/
   wallet.py          - Wallet management
-  tokens.py          - Dynamic on-chain token resolver (no hardcoded list)
+  tokens.py          - Dynamic on-chain token resolver
   gas.py             - EIP-1559 gas estimation
   pool_scanner.py    - Event-driven pool discovery
   watcher.py         - Real-time watcher + auto-LP
+  state.py           - Position lifecycle tracking
+  lessons.py         - Performance engine + threshold evolution
+  safety.py          - Pre-deploy safety checks
 dex/
   uniswap_v3.py      - Uniswap V3 position manager
   aerodrome.py       - Aerodrome router wrapper
@@ -100,9 +120,9 @@ utils/
   approvals.py       - ERC-20 approval management
   formatting.py      - Amount formatting
   logging.py         - Structured logging
+  telegram.py        - Telegram notifications
 ```
 
-## Output Files
+## Risk Disclaimer
 
-- `/tmp/kaori_seen_pools.json` - Tracked pool addresses
-- `/tmp/kaori_discovered_pools.json` - All discovered pools with metadata
+This tool interacts with DeFi protocols and manages real funds. Use at your own risk.
