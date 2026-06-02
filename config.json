@@ -42,8 +42,8 @@
   },
 
   "wallets": {
-    "single": "~/.hermes/credentials/wallet-keys-evm.env",
-    "batch": "~/.hermes/credentials/wallet-keys-evm-tuyul.json"
+    "single": "wallet.env",
+    "batch": "wallets.json"
   },
 
   "dex": {

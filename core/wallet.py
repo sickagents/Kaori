@@ -1,7 +1,12 @@
 """Wallet management for LP agent."""
 
 import os
+from pathlib import Path
 from eth_account import Account
+
+
+# Project root directory
+PROJECT_ROOT = Path(__file__).parent.parent
 
 
 class WalletManager:
@@ -15,7 +20,9 @@ class WalletManager:
         elif wallet_path:
             self.private_key = self._load_wallet(wallet_path)
         else:
-            raise ValueError("Must provide wallet_path or private_key")
+            # Default to wallet.env in project root
+            default_path = PROJECT_ROOT / "wallet.env"
+            self.private_key = self._load_wallet(str(default_path))
 
         self.account = Account.from_key(self.private_key)
         self.address = self.account.address
@@ -24,6 +31,15 @@ class WalletManager:
     def _load_wallet(self, path: str) -> str:
         """Load private key from .env file or JSON."""
         path = os.path.expanduser(path)
+
+        # Try relative to project root first
+        if not os.path.isabs(path):
+            full_path = PROJECT_ROOT / path
+            if full_path.exists():
+                path = str(full_path)
+
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Wallet file not found: {path}")
 
         if path.endswith(".json"):
             import json
