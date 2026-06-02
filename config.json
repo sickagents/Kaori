@@ -10,16 +10,7 @@
     "pairs": [
       {"token0": "WETH", "token1": "USDC", "amount0": "0.01", "amount1": "35"},
       {"token0": "WETH", "token1": "AERO", "amount0": "0.01", "amount1": "50"},
-      {"token0": "AERO", "token1": "USDC", "amount0": "50", "amount1": "35"},
-      {"token0": "WETH", "token1": "BRETT", "amount0": "0.005", "amount1": "10000"},
-      {"token0": "WETH", "token1": "DEGEN", "amount0": "0.005", "amount1": "5000"},
-      {"token0": "WETH", "token1": "TOSHI", "amount0": "0.005", "amount1": "100000"},
-      {"token0": "USDC", "token1": "BRETT", "amount0": "10", "amount1": "5000"},
-      {"token0": "USDC", "token1": "DEGEN", "amount0": "10", "amount1": "2500"},
-      {"token0": "WETH", "token1": "VIRTUAL", "amount0": "0.01", "amount1": "10"},
-      {"token0": "WETH", "token1": "TYBG", "amount0": "0.005", "amount1": "100000"},
-      {"token0": "WETH", "token1": "WELL", "amount0": "0.01", "amount1": "500"},
-      {"token0": "WETH", "token1": "SEAM", "amount0": "0.01", "amount1": "20"}
+      {"token0": "AERO", "token1": "USDC", "amount0": "50", "amount1": "35"}
     ],
     "prefer_dex": "aerodrome",
     "tick_range": 887220,
@@ -58,41 +49,16 @@
     }
   },
 
-  "tokens": {
-    "WETH":    {"address": "0x4200000000000000000000000000000000000006", "decimals": 18, "category": "major"},
-    "USDC":    {"address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "decimals": 6,  "category": "major"},
-    "USDbC":   {"address": "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA", "decimals": 6,  "category": "major"},
-    "DAI":     {"address": "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb", "decimals": 18, "category": "major"},
-    "cbETH":   {"address": "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22", "decimals": 18, "category": "major"},
+  "_comment": "Tokens are resolved dynamically on-chain. No hardcoded list needed.",
+  "_comment2": "Use discover/watch commands to find ALL tokens with pools on Base.",
+  "_comment3": "The tokens below are just reference for manual mode - any token works.",
 
-    "AERO":    {"address": "0x940181a94A35A4569E4529A3CDfB74e38FD98631", "decimals": 18, "category": "defi"},
-    "WELL":    {"address": "0xA88594D404727625A9437C3f886C7643872296AE", "decimals": 18, "category": "defi"},
-    "SEAM":    {"address": "0x1C7a460413dD4e964f96D8dFC56E7223cE88CD85", "decimals": 18, "category": "defi"},
-    "VIRTUAL": {"address": "0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b", "decimals": 18, "category": "defi"},
-    "COMP":    {"address": "0x9e1028F5F1D5eDE59748FFceE5532509976840E0", "decimals": 18, "category": "defi"},
-    "UNI":     {"address": "0xc3De830EA07524a0761646a6a4e4be0e114a3C83", "decimals": 18, "category": "defi"},
-
-    "BRETT":   {"address": "0x532f27101965dd16442E59d40670FaF5eBB142E4", "decimals": 18, "category": "meme"},
-    "TOSHI":   {"address": "0xAC1Bd2486aAf3B5C0fc3Fd868558b082a531B2B4", "decimals": 18, "category": "meme"},
-    "DEGEN":   {"address": "0x4ed4E862860beD51a9570b96d89aF5E1B0Efefed", "decimals": 18, "category": "meme"},
-    "TYBG":    {"address": "0x0d97F261b1e88845184f678e2d1e7a98D9FD38dE", "decimals": 18, "category": "meme"},
-    "NORMIE":  {"address": "0x7F12d13B34F5F4f0a9449c16B4491E16f2821577", "decimals": 18, "category": "meme"},
-    "BENJI":   {"address": "0xbc4564c9B02a0E1f5f16Bf18A5826F5a298F879b", "decimals": 18, "category": "meme"},
-    "BALD":    {"address": "0x27D2DECb5b959301c0C4087E34Ca1F0d9A5B6f5E", "decimals": 18, "category": "meme"},
-    "PEPE":    {"address": "0xb6fe221fe9EeF5aBa221c348bA20A1Bf5e7CD6e8", "decimals": 18, "category": "meme"},
-    "MOCHI":   {"address": "0xF6e932Ca12afa26665dCC03FD1C7d64e7160B39C", "decimals": 18, "category": "meme"},
-    "MFER":    {"address": "0xE3086852A4B125803C815a158249ae468A2184fb", "decimals": 18, "category": "meme"},
-    "DOGINME": {"address": "0x6921B130D290ccf803aE6acA87c61e1b0C9F8B2E", "decimals": 18, "category": "meme"},
-    "CHAD":    {"address": "0xB87571d29E03804Dc4aDE7Bbe3c0E01f89d7e99D", "decimals": 18, "category": "meme"},
-    "MICHI":   {"address": "0x22af33FE49fD1Fa80c7149773dDe5890D3c3827d", "decimals": 18, "category": "meme"},
-    "ROCK":    {"address": "0x7dcC05C41Ee0E0B4b5e2EB8b9F7B7B91C61D3eB0", "decimals": 18, "category": "meme"},
-    "HIGHER":  {"address": "0x0578d8A44db98B23BF096A382e016e29a5Ce0ffe", "decimals": 18, "category": "meme"},
-    "KEYCAT":  {"address": "0x9a26F5433671751C3276a065f57e5a02D2817973", "decimals": 18, "category": "meme"},
-    "TOSHI":   {"address": "0xAC1Bd2486aAf3B5C0fc3Fd868558b082a531B2B4", "decimals": 18, "category": "meme"},
-    "ANDY":    {"address": "0xD3E4Ba1E85D3D1b7c8F8D4C0b5E6F7A8B9C0D1E2", "decimals": 18, "category": "meme"},
-    "MUMU":    {"address": "0x820C4F0e29D3d8F2C2c0E4C4d5E6F7A8B9C0D1E3", "decimals": 18, "category": "meme"},
-    "TOBY":    {"address": "0x1C2b3A4D5E6F7A8B9C0D1E2F3A4B5C6D7E8F9A0B", "decimals": 18, "category": "meme"},
-    "MIGGLES": {"address": "0x2C3b4A5D6E7F8A9B0C1D2E3F4A5B6C7D8E9F0A1B", "decimals": 18, "category": "meme"},
-    "NPC":     {"address": "0x8d9B0c1E2F3A4B5C6D7E8F9A0B1C2D3E4F5A6B7C", "decimals": 18, "category": "meme"}
+  "base_tokens": {
+    "WETH": "0x4200000000000000000000000000000000000006",
+    "USDC": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "USDbC": "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA",
+    "DAI": "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb",
+    "cbETH": "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22",
+    "AERO": "0x940181a94A35A4569E4529A3CDfB74e38FD98631"
   }
 }

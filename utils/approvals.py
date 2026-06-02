@@ -1,7 +1,7 @@
 """ERC-20 approval management."""
 
 from web3 import Web3
-from core.tokens import TokenRegistry
+from core.tokens import TokenResolver
 
 
 class ApprovalManager:
@@ -12,26 +12,22 @@ class ApprovalManager:
     def __init__(self, w3, wallet):
         self.w3 = w3
         self.wallet = wallet
+        self.resolver = TokenResolver(w3)
 
     def get_allowance(self, token_address: str, spender: str) -> int:
-        """Get current allowance."""
-        return TokenRegistry.get_allowance(
-            self.w3, token_address, self.wallet.address, spender
-        )
+        return self.resolver.get_allowance(token_address, self.wallet.address, spender)
 
     def ensure_approval(self, token_address: str, spender: str, amount: int):
-        """Ensure sufficient approval. Approves max if needed."""
         current = self.get_allowance(token_address, spender)
-
         if current >= amount:
-            return  # Already approved
-
-        # Approve max amount
+            return
         self.approve(token_address, spender, self.MAX_UINT256)
 
     def approve(self, token_address: str, spender: str, amount: int) -> bytes:
-        """Send approve transaction."""
-        contract = TokenRegistry.get_contract(self.w3, token_address)
+        from core.tokens import ERC20_ABI
+        contract = self.w3.eth.contract(
+            address=Web3.to_checksum_address(token_address), abi=ERC20_ABI
+        )
 
         tx = contract.functions.approve(spender, amount).build_transaction({
             "from": self.wallet.address,
@@ -39,7 +35,6 @@ class ApprovalManager:
             "chainId": self.w3.eth.chain_id,
         })
 
-        # Add gas params
         try:
             latest = self.w3.eth.get_block("latest")
             base_fee = latest.get("baseFeePerGas", 0)
@@ -53,7 +48,7 @@ class ApprovalManager:
         except Exception:
             tx["gasPrice"] = int(self.w3.eth.gas_price * 1.2)
 
-        tx["gas"] = 100_000  # Standard approval gas
+        tx["gas"] = 100_000
 
         tx_hash = self.wallet.sign_and_send(tx)
         receipt = self.wallet.wait_for_receipt(tx_hash)

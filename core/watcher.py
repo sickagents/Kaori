@@ -1,21 +1,26 @@
-"""New pool watcher - monitors for new LP creation and auto-adds liquidity."""
+"""New pool watcher - monitors for ANY new LP creation and auto-adds liquidity.
+
+Works with all tokens on Base - no hardcoded list needed.
+Tokens are resolved on-chain when a new pool is detected.
+"""
 
 import time
 import json
 from pathlib import Path
 from web3 import Web3
 
-from core.pool_scanner import PoolScanner
+from core.pool_scanner import PoolScanner, BASE_TOKENS
+from core.tokens import TokenResolver
 from core.wallet import WalletManager
 from core.gas import GasEstimator
 from utils.approvals import ApprovalManager
 
 
 SEEN_FILE = Path("/tmp/kaori_seen_pools.json")
+RESULTS_FILE = Path("/tmp/kaori_discovered_pools.json")
 
 
 def load_seen() -> set:
-    """Load seen pool addresses."""
     if SEEN_FILE.exists():
         with open(SEEN_FILE) as f:
             return set(json.load(f))
@@ -23,9 +28,25 @@ def load_seen() -> set:
 
 
 def save_seen(seen: set):
-    """Save seen pool addresses."""
     with open(SEEN_FILE, "w") as f:
         json.dump(list(seen), f)
+
+
+def save_results(pools: list):
+    """Save discovered pools for analysis."""
+    existing = []
+    if RESULTS_FILE.exists():
+        with open(RESULTS_FILE) as f:
+            existing = json.load(f)
+
+    existing.extend(pools)
+
+    # Keep last 5000 entries
+    if len(existing) > 5000:
+        existing = existing[-5000:]
+
+    with open(RESULTS_FILE, "w") as f:
+        json.dump(existing, f, indent=2, default=str)
 
 
 def auto_lp_new_pool(config: dict, w3: Web3, pool: dict, wallet, gas) -> bool:
@@ -36,87 +57,79 @@ def auto_lp_new_pool(config: dict, w3: Web3, pool: dict, wallet, gas) -> bool:
 
     print(f"    Auto-LP: {t0['symbol']}/{t1['symbol']} on {dex_name}")
 
-    # Skip if pool address is unknown
     if pool.get("pool") == "unknown" or pool["pool"] == "0x0000000000000000000000000000000000000000":
         print(f"    SKIP: Unknown pool address")
         return False
 
-    # Calculate amounts based on available balance
     try:
-        # Check ETH balance
         eth_balance = w3.eth.get_balance(wallet.address)
-        eth_amount = min(eth_balance * 0.1, int(0.005 * 1e18))  # Use 10% of balance or 0.005 ETH max
+        eth_amount = min(eth_balance * 0.05, int(0.005 * 1e18))  # 5% balance or 0.005 ETH
 
-        if eth_amount < int(0.001 * 1e18):
-            print(f"    SKIP: Insufficient ETH balance ({eth_balance / 1e18:.4f} ETH)")
+        if eth_amount < int(0.0005 * 1e18):
+            print(f"    SKIP: Insufficient ETH ({eth_balance / 1e18:.4f})")
             return False
 
-        # For WETH pairs, wrap ETH
         WETH = "0x4200000000000000000000000000000000000006"
-        is_weth_pair = t0["address"].lower() == WETH.lower() or t1["address"].lower() == WETH.lower()
+        is_weth = t0["address"].lower() == WETH.lower() or t1["address"].lower() == WETH.lower()
+        is_base = t0["address"] in BASE_TOKENS or t1["address"] in BASE_TOKENS
+
+        if not is_base:
+            print(f"    SKIP: No base token in pair")
+            return False
+
+        # Determine amounts
+        if is_weth:
+            amount0 = eth_amount
+            amount1 = eth_amount
+        else:
+            # For USDC/AERO pairs, use small amount
+            amount0 = eth_amount
+            amount1 = eth_amount
 
         if dex_name == "aerodrome":
             from dex.aerodrome import Aerodrome
             dex = Aerodrome(w3, config["dex"]["aerodrome"], gas)
 
-            if is_weth_pair:
-                # Pair with WETH
-                if t0["address"].lower() == WETH.lower():
-                    amount0 = eth_amount
-                    amount1 = eth_amount  # 1:1 for simplicity, adjust with price oracle
-                else:
-                    amount0 = eth_amount
-                    amount1 = eth_amount
-
-                # Approve non-WETH token
-                other_token = t1 if t0["address"].lower() == WETH.lower() else t0
+            other = t1 if t0["address"] in BASE_TOKENS else t0
+            if other["address"] != WETH:
                 ApprovalManager(w3, wallet).ensure_approval(
-                    other_token["address"], config["dex"]["aerodrome"]["router"], amount1
+                    other["address"], config["dex"]["aerodrome"]["router"], amount1
                 )
 
-                tx_hash = dex.add_liquidity(
-                    wallet=wallet,
-                    token0=t0["address"],
-                    token1=t1["address"],
-                    amount0_desired=amount0,
-                    amount1_desired=amount1,
-                    stable=pool.get("stable", False),
-                    slippage=config["slippage"],
-                    deadline=config["deadline"],
-                )
-            else:
-                print(f"    SKIP: Non-WETH pair not supported for auto-LP yet")
-                return False
+            tx_hash = dex.add_liquidity(
+                wallet=wallet,
+                token0=t0["address"],
+                token1=t1["address"],
+                amount0_desired=amount0,
+                amount1_desired=amount1,
+                stable=pool.get("stable", False),
+                slippage=config["slippage"],
+                deadline=config["deadline"],
+            )
 
         elif dex_name == "uniswap_v3":
             from dex.uniswap_v3 import UniswapV3
             dex = UniswapV3(w3, config["dex"]["uniswap_v3"], gas)
             fee = pool.get("fee", 3000)
 
-            if is_weth_pair:
-                amount0 = eth_amount
-                amount1 = eth_amount
-
-                other_token = t1 if t0["address"].lower() == WETH.lower() else t0
+            other = t1 if t0["address"] in BASE_TOKENS else t0
+            if other["address"] != WETH:
                 ApprovalManager(w3, wallet).ensure_approval(
-                    other_token["address"], config["dex"]["uniswap_v3"]["position_manager"], amount1
+                    other["address"], config["dex"]["uniswap_v3"]["position_manager"], amount1
                 )
 
-                tx_hash = dex.add_liquidity(
-                    wallet=wallet,
-                    token0=t0["address"],
-                    token1=t1["address"],
-                    fee=fee,
-                    tick_lower=-887220,
-                    tick_upper=887220,
-                    amount0_desired=amount0,
-                    amount1_desired=amount1,
-                    slippage=config["slippage"],
-                    deadline=config["deadline"],
-                )
-            else:
-                print(f"    SKIP: Non-WETH pair not supported for auto-LP yet")
-                return False
+            tx_hash = dex.add_liquidity(
+                wallet=wallet,
+                token0=t0["address"],
+                token1=t1["address"],
+                fee=fee,
+                tick_lower=-887220,
+                tick_upper=887220,
+                amount0_desired=amount0,
+                amount1_desired=amount1,
+                slippage=config["slippage"],
+                deadline=config["deadline"],
+            )
         else:
             print(f"    SKIP: Unknown DEX {dex_name}")
             return False
@@ -130,22 +143,22 @@ def auto_lp_new_pool(config: dict, w3: Web3, pool: dict, wallet, gas) -> bool:
 
 
 def run_watcher(config: dict, auto_add: bool = True, scan_interval: int = 30):
-    """Run the new pool watcher."""
+    """Run the new pool watcher. Works with ALL tokens on Base."""
     w3 = Web3(Web3.HTTPProvider(config["rpc"]))
     if not w3.is_connected():
         raise ConnectionError(f"Failed to connect: {config['rpc']}")
 
     print(f"[+] Connected to Base (block: {w3.eth.block_number})")
 
-    wallet_path = config["wallets"]["single"]
-    wallet = WalletManager(w3, wallet_path)
+    wallet = WalletManager(w3, config["wallets"]["single"])
     gas = GasEstimator(w3, config["chain_id"], config["gas_multiplier"])
     scanner = PoolScanner(w3, config)
 
     seen = load_seen()
-    print(f"[*] Watching for new pools (auto-add: {auto_add})")
+    print(f"[*] Mode: {'auto-LP' if auto_add else 'detect only'}")
     print(f"[*] Wallet: {wallet.address}")
-    print(f"[*] Scan interval: {scan_interval}s")
+    print(f"[*] Interval: {scan_interval}s")
+    print(f"[*] Tracking ALL tokens on Base (no hardcoded list)")
     print(f"[*] Seen pools: {len(seen)}")
 
     last_block = w3.eth.block_number
@@ -153,39 +166,39 @@ def run_watcher(config: dict, auto_add: bool = True, scan_interval: int = 30):
     while True:
         try:
             current_block = w3.eth.block_number
-
             if current_block <= last_block:
                 time.sleep(scan_interval)
                 continue
 
-            # Scan for new pools
             pools = scanner.scan_all(last_block + 1, current_block)
             new_pools = [p for p in pools if p["pool"] not in seen]
 
             if new_pools:
-                print(f"\n[!] {len(new_pools)} NEW POOLS DETECTED!")
+                print(f"\n[!] {len(new_pools)} NEW POOLS!")
+
+                # Save all discovered pools
+                save_results([{**p, "token0": p["token0"]["address"], "token1": p["token1"]["address"],
+                               "token0_sym": p["token0"]["symbol"], "token1_sym": p["token1"]["symbol"]}
+                              for p in new_pools])
 
                 for pool in new_pools:
                     seen.add(pool["pool"])
                     t0 = pool["token0"]
                     t1 = pool["token1"]
+                    base = "BASE" if pool.get("has_base_token") else "OTHER"
 
-                    print(f"\n  [{pool['dex'].upper()}] {t0['symbol']}/{t1['symbol']}")
+                    print(f"\n  [{pool['dex'].upper()}] [{base}] {t0['symbol']}/{t1['symbol']}")
                     print(f"    Pool: {pool['pool']}")
-                    print(f"    Block: {pool['block']}")
+                    print(f"    Token0: {t0['symbol']} ({t0['address'][:10]}...)")
+                    print(f"    Token1: {t1['symbol']} ({t1['address'][:10]}...)")
                     if pool["dex"] == "uniswap_v3":
                         print(f"    Fee: {pool['fee'] / 10000}%")
-                    print(f"    Base token: {pool.get('has_base_token', False)}")
 
-                    # Auto-add LP if enabled and pool has a base token
                     if auto_add and pool.get("has_base_token"):
                         success = auto_lp_new_pool(config, w3, pool, wallet, gas)
                         if success:
-                            print(f"    [+] LP added successfully!")
-                        else:
-                            print(f"    [-] Auto-LP skipped or failed")
+                            print(f"    [+] LP ADDED!")
 
-            # Save state
             save_seen(seen)
             last_block = current_block
 

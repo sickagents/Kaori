@@ -20,7 +20,7 @@ from eth_account import Account
 sys.path.insert(0, str(Path(__file__).parent))
 
 from core.wallet import WalletManager
-from core.tokens import TokenRegistry
+from core.tokens import TokenResolver
 from core.gas import GasEstimator
 from dex.uniswap_v3 import UniswapV3
 from dex.aerodrome import Aerodrome
@@ -52,20 +52,23 @@ def get_w3(config: dict) -> Web3:
     return w3
 
 
-def resolve_token(tokens_config: dict, identifier: str) -> dict:
-    """Resolve token by symbol or address."""
+def resolve_token(w3: Web3, identifier: str) -> dict:
+    """Resolve token by symbol or address - dynamically from chain."""
+    resolver = TokenResolver(w3)
+
+    # If it looks like an address
+    if identifier.startswith("0x") and len(identifier) == 42:
+        return resolver.resolve(identifier)
+
+    # If it's a symbol, check base_tokens first for known addresses
+    config = load_config()
+    base_tokens = config.get("base_tokens", {})
     key = identifier.upper()
-    if key in tokens_config:
-        return {
-            "address": Web3.to_checksum_address(tokens_config[key]["address"]),
-            "decimals": tokens_config[key]["decimals"],
-            "symbol": key,
-        }
-    try:
-        addr = Web3.to_checksum_address(identifier)
-        return {"address": addr, "decimals": 18, "symbol": "UNKNOWN"}
-    except Exception:
-        raise ValueError(f"Unknown token: {identifier}")
+    if key in base_tokens:
+        return resolver.resolve(base_tokens[key])
+
+    # Unknown symbol - can't resolve without address
+    raise ValueError(f"Unknown token symbol: {identifier}. Use full address (0x...) instead.")
 
 
 def get_dex(config: dict, w3: Web3, gas: GasEstimator, dex_name: str):
@@ -123,8 +126,8 @@ def add_lp_aerodrome(config, w3, wallet, gas, t0, t1, amount0, amount1, pair_cfg
 
 def add_lp_for_pair(config, w3, wallet, gas, pair):
     """Add LP for a single pair. Auto-selects DEX or uses specified one."""
-    t0 = resolve_token(config["tokens"], pair["token0"])
-    t1 = resolve_token(config["tokens"], pair["token1"])
+    t0 = resolve_token(w3, pair["token0"])
+    t1 = resolve_token(w3, pair["token1"])
     amount0 = parse_amount(str(pair["amount0"]), t0["decimals"])
     amount1 = parse_amount(str(pair["amount1"]), t1["decimals"])
 

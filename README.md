@@ -2,99 +2,76 @@
 
 Automated Liquidity Pool agent for **Base network**. Supports Uniswap V3 and Aerodrome.
 
+**Works with ALL tokens on Base** - no hardcoded token list. Tokens are resolved dynamically on-chain.
+
 ## Quick Start (Server)
 
 ```bash
-# 1. Clone
 git clone https://github.com/sickagents/Kaori.git
 cd Kaori
-
-# 2. Install deps
 pip install -r requirements.txt
-
-# 3. Setup wallet
 cp wallet.env.example wallet.env
 # Edit wallet.env with your private key
-
-# 4. Run
-python3 lp_agent.py run           # LP based on config mode
-python3 lp_agent.py discover      # Scan for new pools
-python3 lp_agent.py watch         # Watch + auto-LP new pools
-python3 lp_agent.py positions     # Check positions
-python3 lp_agent.py show          # Show config
-```
-
-## Wallet Setup
-
-**wallet.env** (git-ignored, copy from example):
-```
-PRIVATE_KEY=0xYOUR_PRIVATE_KEY
-ADDRESS=0xYOUR_WALLET_ADDRESS
-```
-
-For batch mode, create **wallets.json**:
-```json
-[
-  {"address": "0x...", "private_key": "0x..."},
-  {"address": "0x...", "private_key": "0x..."}
-]
-```
-
-## Configuration (config.json)
-
-**Mode:** Set `mode` to `"auto"` or `"manual"`.
-
-### Manual Mode
-Single pair, single run:
-```json
-{
-  "mode": "manual",
-  "manual": {
-    "dex": "aerodrome",
-    "token0": "WETH",
-    "token1": "USDC",
-    "amount0": "0.01",
-    "amount1": "35",
-    "stable": false
-  }
-}
-```
-
-### Auto Mode
-Multiple pairs, optional loop:
-```json
-{
-  "mode": "auto",
-  "auto": {
-    "pairs": [
-      {"token0": "WETH", "token1": "USDC", "amount0": "0.01", "amount1": "35"},
-      {"token0": "WETH", "token1": "BRETT", "amount0": "0.005", "amount1": "10000"}
-    ],
-    "prefer_dex": "aerodrome",
-    "run_interval_seconds": 3600,
-    "max_positions": 10
-  }
-}
+python3 lp_agent.py run
 ```
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `run` | Execute LP based on config mode |
+| `run` | Execute LP based on config mode (auto/manual) |
 | `discover --blocks N` | Scan last N blocks for new pools |
 | `watch --interval N` | Real-time watch + auto-LP new pools |
-| `watch --no-auto` | Detect new pools only (no auto-LP) |
+| `watch --no-auto` | Detect new pools only |
 | `batch --wallets file.json` | Run LP across multiple wallets |
 | `positions` | Check active LP positions |
-| `mode <auto\|manual>` | Switch mode in config |
-| `show` | Display current config |
+| `mode <auto\|manual>` | Switch mode |
+| `show` | Show current config |
 
-## Supported Tokens (30+)
+## How It Works
 
-**Major:** WETH, USDC, USDbC, DAI, cbETH
-**DeFi:** AERO, WELL, SEAM, VIRTUAL, COMP, UNI
-**Meme:** BRETT, TOSHI, DEGEN, TYBG, NORMIE, BENJI, BALD, PEPE, MOCHI, MFER, DOGINME, CHAD, MICHI, ROCK, HIGHER, KEYCAT, ANDY, MUMU, TOBY, MIGGLES, NPC
+**Dynamic Token Resolution:**
+- No hardcoded token list
+- Tokens are resolved on-chain via ERC-20 `symbol()`, `decimals()`, `name()`
+- Works with ANY token that has a pool on Uniswap V3 or Aerodrome
+- Supports thousands to millions of tokens
+
+**Pool Discovery:**
+- Monitors `PoolCreated` events from Uniswap V3 Factory
+- Monitors Aerodrome Factory events
+- Resolves both tokens in each new pool on-chain
+- Filters for pools with base tokens (WETH, USDC, etc.)
+
+**Auto-LP:**
+- Adds liquidity to new pools automatically
+- Uses 5% of ETH balance per pool (max 0.005 ETH)
+- Only targets pools with base/stable tokens
+- Tracks seen pools to avoid duplicates
+
+## Configuration (config.json)
+
+```json
+{
+  "mode": "auto",
+  "auto": {
+    "pairs": [
+      {"token0": "WETH", "token1": "USDC", "amount0": "0.01", "amount1": "35"},
+      {"token0": "0x...", "token1": "USDC", "amount0": "100", "amount1": "100"}
+    ]
+  },
+  "manual": {
+    "dex": "aerodrome",
+    "token0": "WETH",
+    "token1": "0xSOME_TOKEN_ADDRESS",
+    "amount0": "0.01",
+    "amount1": "100"
+  }
+}
+```
+
+**Manual mode** accepts:
+- Symbol: `"WETH"`, `"USDC"`, `"AERO"` (from base_tokens lookup)
+- Address: `"0x532f27101965dd16442E59d40670FaF5eBB142E4"` (any ERC-20)
 
 ## Supported DEXs
 
@@ -106,15 +83,15 @@ Multiple pairs, optional loop:
 ## Architecture
 
 ```
-lp_agent.py          - CLI + auto/manual/discover/watch logic
-config.json          - All configuration
+lp_agent.py          - CLI (run/discover/watch/batch/positions/mode/show)
+config.json          - Configuration
 wallet.env           - Private key (git-ignored)
 core/
   wallet.py          - Wallet management
-  tokens.py          - Token registry + ERC-20
+  tokens.py          - Dynamic on-chain token resolver (no hardcoded list)
   gas.py             - EIP-1559 gas estimation
-  pool_scanner.py    - On-chain event scanner
-  watcher.py         - Real-time pool watcher + auto-LP
+  pool_scanner.py    - Event-driven pool discovery
+  watcher.py         - Real-time watcher + auto-LP
 dex/
   uniswap_v3.py      - Uniswap V3 position manager
   aerodrome.py       - Aerodrome router wrapper
@@ -125,18 +102,7 @@ utils/
   logging.py         - Structured logging
 ```
 
-## Auto-Discover Flow
+## Output Files
 
-```
-watch command:
-  1. Monitor V3 Factory PoolCreated events
-  2. Monitor Aerodrome Factory events
-  3. Filter pools with known Base tokens
-  4. Auto-add LP to new pools (0.005 ETH per pool)
-  5. Track seen pools in /tmp/kaori_seen_pools.json
-  6. V4 ready (placeholder for Initialize events)
-```
-
-## Risk Disclaimer
-
-This tool interacts with DeFi protocols. Use at your own risk. Test with small amounts first.
+- `/tmp/kaori_seen_pools.json` - Tracked pool addresses
+- `/tmp/kaori_discovered_pools.json` - All discovered pools with metadata

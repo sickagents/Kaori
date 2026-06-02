@@ -1,67 +1,56 @@
-"""Pool scanner - monitors on-chain events for new LP creation on Base."""
+"""Pool scanner - monitors on-chain events for ANY token on Base.
+
+Scans Uniswap V3 Factory and Aerodrome Factory for new pool creation.
+No hardcoded token list - resolves all tokens on-chain dynamically.
+"""
 
 import time
-import json
 from web3 import Web3
-from eth_account import Account
+from core.tokens import TokenResolver
 
 
 # Event signatures
-# V3: PoolCreated(address indexed token0, address indexed token1, uint24 indexed fee, int24 tickSpacing, address pool)
 V3_POOL_CREATED_TOPIC = "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118"
 
-# Aerodrome: PoolCreated(address indexed token0, address indexed token1, bool indexed stable, address pool, uint)
-# Different signature - we'll detect by scanning factory address
-
-# Uniswap V4: Initialize(bytes32 indexed poolId, address indexed currency0, address indexed currency1, uint24 fee, int24 tickSpacing, address hooks)
-V4_INITIALIZE_TOPIC = "0x3fd553db44f207b1f41348cfc4d251860814af9eadc470e8e7895e4d120511f4"
+# Known stable/base tokens for pair detection
+BASE_TOKENS = {
+    "0x4200000000000000000000000000000000000006",  # WETH
+    "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",  # USDC
+    "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA",  # USDbC
+    "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb",  # DAI
+    "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22",  # cbETH
+    "0x940181a94A35A4569E4529A3CDfB74e38FD98631",  # AERO
+}
 
 
 class PoolScanner:
-    """Scans on-chain events for new pool creation."""
+    """Scans on-chain events for new pool creation. Works with ANY token."""
 
     def __init__(self, w3: Web3, config: dict):
         self.w3 = w3
         self.config = config
         self.v3_factory = Web3.to_checksum_address(config["dex"]["uniswap_v3"]["factory"])
         self.aero_factory = Web3.to_checksum_address(config["dex"]["aerodrome"]["factory"])
-        self.tokens = config.get("tokens", {})
-        self.token_addresses = set()
+        self.resolver = TokenResolver(w3)
 
-        # Build known token set
-        for info in self.tokens.values():
-            self.token_addresses.add(Web3.to_checksum_address(info["address"]))
+    def _has_base_token(self, token0: str, token1: str) -> bool:
+        """Check if pair has at least one base/stable token."""
+        t0 = Web3.to_checksum_address(token0)
+        t1 = Web3.to_checksum_address(token1)
+        return t0 in BASE_TOKENS or t1 in BASE_TOKENS
 
-    def _is_known_token(self, address: str) -> bool:
-        """Check if a token address is in our known list."""
-        return Web3.to_checksum_address(address) in self.token_addresses
-
-    def _get_token_info(self, address: str) -> dict:
-        """Get on-chain token info (symbol, decimals)."""
-        address = Web3.to_checksum_address(address)
-
-        # Check cache first
-        for sym, info in self.tokens.items():
-            if Web3.to_checksum_address(info["address"]) == address:
-                return {"symbol": sym, "decimals": info["decimals"], "address": address}
-
-        # Fetch from chain
-        try:
-            abi = [
-                {"constant": True, "inputs": [], "name": "symbol", "outputs": [{"name": "", "type": "string"}], "type": "function"},
-                {"constant": True, "inputs": [], "name": "decimals", "outputs": [{"name": "", "type": "uint8"}], "type": "function"},
-            ]
-            c = self.w3.eth.contract(address=address, abi=abi)
-            sym = c.functions.symbol().call()
-            dec = c.functions.decimals().call()
-            return {"symbol": sym, "decimals": dec, "address": address}
-        except Exception:
-            return {"symbol": "UNKNOWN", "decimals": 18, "address": address}
+    def _get_other_token(self, token0: str, token1: str) -> str:
+        """Get the non-base token address."""
+        t0 = Web3.to_checksum_address(token0)
+        t1 = Web3.to_checksum_address(token1)
+        if t0 in BASE_TOKENS:
+            return t1
+        return t0
 
     def scan_v3_new_pools(self, from_block: int, to_block: int) -> list:
         """Scan for new Uniswap V3 pools."""
         pools = []
-        chunk_size = 50  # RPC limit
+        chunk_size = 50
 
         for start in range(from_block, to_block + 1, chunk_size):
             end = min(start + chunk_size - 1, to_block)
@@ -78,12 +67,12 @@ class PoolScanner:
                     token1 = "0x" + log["topics"][2].hex()[-40:]
                     fee = int(log["topics"][3].hex(), 16)
 
-                    # Decode pool address from data
-                    data = log["data"].hex() if isinstance(log["data"], bytes) else log["data"].hex()
+                    data = log["data"].hex() if isinstance(log["data"], bytes) else log["data"]
                     pool_addr = "0x" + data[-40:]
 
-                    t0_info = self._get_token_info(token0)
-                    t1_info = self._get_token_info(token1)
+                    # Resolve both tokens on-chain
+                    t0_info = self.resolver.resolve(token0)
+                    t1_info = self.resolver.resolve(token1)
 
                     pools.append({
                         "dex": "uniswap_v3",
@@ -92,18 +81,18 @@ class PoolScanner:
                         "token1": t1_info,
                         "fee": fee,
                         "block": log["blockNumber"],
-                        "has_base_token": self._is_known_token(token0) or self._is_known_token(token1),
+                        "has_base_token": self._has_base_token(token0, token1),
                     })
 
-            except Exception as e:
+            except Exception:
                 pass
 
-            time.sleep(0.2)
+            time.sleep(0.15)
 
         return pools
 
     def scan_aero_new_pools(self, from_block: int, to_block: int) -> list:
-        """Scan for new Aerodrome pools by monitoring factory events."""
+        """Scan for new Aerodrome pools."""
         pools = []
         chunk_size = 50
 
@@ -119,52 +108,46 @@ class PoolScanner:
                 for log in logs:
                     topics = log["topics"]
                     if len(topics) >= 3:
-                        # Try to decode as PoolCreated
-                        token0 = "0x" + topics[1].hex()[-40:] if len(topics) > 1 else None
-                        token1 = "0x" + topics[2].hex()[-40:] if len(topics) > 2 else None
+                        token0 = "0x" + topics[1].hex()[-40:]
+                        token1 = "0x" + topics[2].hex()[-40:]
 
-                        if token0 and token1:
-                            t0_info = self._get_token_info(token0)
-                            t1_info = self._get_token_info(token1)
+                        t0_info = self.resolver.resolve(token0)
+                        t1_info = self.resolver.resolve(token1)
 
-                            # Decode pool address from data
-                            data_hex = log["data"].hex() if isinstance(log["data"], bytes) else log["data"]
-                            pool_addr = "0x" + data_hex[-40:] if len(data_hex) >= 40 else "0x0"
+                        data_hex = log["data"].hex() if isinstance(log["data"], bytes) else log["data"]
+                        pool_addr = "0x" + data_hex[-40:] if len(data_hex) >= 40 else "0x0"
 
-                            pools.append({
-                                "dex": "aerodrome",
-                                "pool": Web3.to_checksum_address(pool_addr) if pool_addr != "0x0" else "unknown",
-                                "token0": t0_info,
-                                "token1": t1_info,
-                                "stable": len(topics) > 3 and int(topics[3].hex(), 16) == 1,
-                                "block": log["blockNumber"],
-                                "has_base_token": self._is_known_token(token0) or self._is_known_token(token1),
-                            })
+                        pools.append({
+                            "dex": "aerodrome",
+                            "pool": Web3.to_checksum_address(pool_addr) if pool_addr != "0x0" else "unknown",
+                            "token0": t0_info,
+                            "token1": t1_info,
+                            "stable": len(topics) > 3 and int(topics[3].hex(), 16) == 1,
+                            "block": log["blockNumber"],
+                            "has_base_token": self._has_base_token(token0, token1),
+                        })
 
-            except Exception as e:
+            except Exception:
                 pass
 
-            time.sleep(0.2)
+            time.sleep(0.15)
 
         return pools
 
     def scan_v4_new_pools(self, from_block: int, to_block: int) -> list:
-        """Scan for new Uniswap V4 pools (if deployed on Base)."""
-        # V4 PoolManager not yet on Base - placeholder
-        # When deployed, monitor Initialize events from the PoolManager address
-        pools = []
-        return pools
+        """Scan for new Uniswap V4 pools (placeholder for Base deployment)."""
+        return []
 
     def scan_all(self, from_block: int, to_block: int) -> list:
         """Scan all DEXs for new pools."""
         all_pools = []
 
-        print(f"[*] Scanning blocks {from_block} -> {to_block} for new pools...")
+        print(f"[*] Scanning blocks {from_block} -> {to_block}...")
 
         v3 = self.scan_v3_new_pools(from_block, to_block)
         all_pools.extend(v3)
         if v3:
-            print(f"    Uniswap V3: {len(v3)} new pools")
+            print(f"    V3: {len(v3)} new pools")
 
         aero = self.scan_aero_new_pools(from_block, to_block)
         all_pools.extend(aero)
@@ -174,10 +157,22 @@ class PoolScanner:
         v4 = self.scan_v4_new_pools(from_block, to_block)
         all_pools.extend(v4)
         if v4:
-            print(f"    Uniswap V4: {len(v4)} new pools")
+            print(f"    V4: {len(v4)} new pools")
 
         return all_pools
 
     def filter_base_pools(self, pools: list) -> list:
-        """Filter pools that contain at least one known Base token."""
+        """Filter pools that have at least one base/stable token."""
         return [p for p in pools if p.get("has_base_token", False)]
+
+    def filter_new_token_pools(self, pools: list) -> list:
+        """Filter pools where at least one token is NOT in the base set.
+        These are 'new token' pools - the interesting ones for early LP."""
+        result = []
+        for p in pools:
+            t0_addr = p["token0"]["address"]
+            t1_addr = p["token1"]["address"]
+            # At least one token is NOT a base token = new/unknown token
+            if t0_addr not in BASE_TOKENS or t1_addr not in BASE_TOKENS:
+                result.append(p)
+        return result
