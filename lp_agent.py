@@ -351,6 +351,15 @@ def main():
     # show
     subparsers.add_parser("show", help="Show current config")
 
+    # discover
+    disc_p = subparsers.add_parser("discover", help="Scan for new pools on Base")
+    disc_p.add_argument("--blocks", type=int, default=500, help="How many blocks back to scan")
+
+    # watch
+    watch_p = subparsers.add_parser("watch", help="Watch for new pools and auto-add LP")
+    watch_p.add_argument("--interval", type=int, default=30, help="Scan interval in seconds")
+    watch_p.add_argument("--no-auto", action="store_true", help="Only detect, don't auto-add LP")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -359,12 +368,52 @@ def main():
 
     config = load_config()
 
+    # Import watcher/discoverer
+    from core.pool_scanner import PoolScanner
+    from core.watcher import run_watcher
+
+    def cmd_discover(args, config):
+        """Scan for new pools."""
+        w3 = get_w3(config)
+        scanner = PoolScanner(w3, config)
+        current = w3.eth.block_number
+        pools = scanner.scan_all(current - args.blocks, current)
+
+        base_pools = scanner.filter_base_pools(pools)
+        other_pools = [p for p in pools if not p.get("has_base_token")]
+
+        print(f"\n{'='*60}")
+        print(f"RESULTS: {len(pools)} total pools, {len(base_pools)} with Base tokens")
+        print(f"{'='*60}")
+
+        if base_pools:
+            print(f"\n[Base Token Pools]")
+            for p in base_pools:
+                t0, t1 = p["token0"], p["token1"]
+                fee_str = f" fee={p['fee']/10000}%" if p["dex"] == "uniswap_v3" else ""
+                stable_str = " STABLE" if p.get("stable") else ""
+                print(f"  [{p['dex']}] {t0['symbol']}/{t1['symbol']}{fee_str}{stable_str} | block={p['block']}")
+                print(f"    Pool: {p['pool']}")
+
+        if other_pools:
+            print(f"\n[Other New Pools]")
+            for p in other_pools[:10]:
+                t0, t1 = p["token0"], p["token1"]
+                print(f"  [{p['dex']}] {t0['symbol']}/{t1['symbol']} | block={p['block']}")
+
+    def cmd_watch(args, config):
+        """Watch for new pools and auto-add LP."""
+        auto = not args.no_auto
+        run_watcher(config, auto_add=auto, scan_interval=args.interval)
+
     commands = {
         "run": cmd_run,
         "batch": cmd_batch,
         "positions": cmd_positions,
         "mode": cmd_set_mode,
         "show": cmd_show,
+        "discover": cmd_discover,
+        "watch": cmd_watch,
     }
 
     commands[args.command](args, config)
